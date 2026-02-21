@@ -130,3 +130,35 @@ These rules are designed around failure types, not benchmark-specific phrases.
 - Interpretation:
   - The rules strongly improved correctness by aggressively recovering local failure modes with cloud fallback.
   - Latency and on-device ratio worsened, so next iteration should reduce unnecessary cloud routing on medium/hard cases where local is still usable.
+
+## 12) Why Score Increased (Rule Attribution)
+- Detailed comparison snapshot:
+  - local total score: `43.12`
+  - 5-rule hybrid total score: `59.95`
+  - local avg F1: `0.30` -> hybrid avg F1: `0.9444`
+  - local avg time: `413.6ms` -> hybrid avg time: `1325.46ms`
+  - hybrid on-device ratio: `20%`
+- Fallback reason counts (hybrid run):
+  - `empty_function_calls`: 14
+  - `parse_fail_sentinel`: 5
+  - `multi_action_under_called`: 3
+  - `low_confidence`: 1
+  - `hour_out_of_range`: 1
+- Main contributor:
+  - Most gains came from converting prior `F1=0` local failures (`parse_fail` and `empty calls`) into cloud-correct calls.
+
+## 13) Why F1 Looks Near-Discrete (Mostly 0/1)
+- This is expected with current benchmark composition and matching rules:
+  - Expected-call count distribution:
+    - 1 call: 20 cases
+    - 2 calls: 7 cases
+    - 3 calls: 3 cases
+- Matching strictness:
+  - function name must match exactly
+  - required argument keys must exist
+  - argument values must match after only `strip().lower()` normalization
+  - punctuation/details can still fail equality checks
+- Therefore:
+  - single-call cases naturally collapse to mostly `0` or `1`
+  - partial values like `0.67` mainly appear in multi-call cases (e.g., 1/2 matched)
+  - parse failures often become immediate `0` because local fallback object has empty calls
