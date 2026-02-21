@@ -1,25 +1,66 @@
-"""Selective routing strategy: maximize on-device ratio while preserving F1.
+"""Selective routing strategy v2.2: cactus_complete parameter tuning for on-device ratio.
 
-Key insight from session data:
-- On-device wins are concentrated in single-action, simple-function cases.
-- On-device perfect rate for multi_action=True is 0%.
-- Cloud fallback should only trigger for clear failure signals or multi-action.
-- Score formula: 60% F1 + 15% Time + 25% On-device ratio.
-  -> Keeping more cases on-device boosts both Time and On-device scores.
+v2.1: F1=0.96, on-device=20%, score=60.9%
 
-Compared to strategy_balanced:
-- Tighter cloud gating: only fallback on hard failures, not soft confidence.
-- Single-action with valid parse stays on-device even at lower confidence.
-- Multi-action detection triggers cloud immediately.
+v2.2 changes:
+- Direct cactus_complete call with tuned parameters:
+  - confidence_threshold=0.0 (prevent early cloud_handoff on first-token uncertainty)
+  - temperature=0.2 (escape greedy decoding refusal traps)
+  - tool_rag_top_k=0 (disable tool filtering, include all tools in prompt)
+  - max_tokens=512 (more token space for multi-call attempts)
+  - Remove <|im_end|> stop sequence (unnecessary for Gemma)
+- Routing gates unchanged from v2.1.
+- Target: on-device 25-35%, F1 maintained.
 """
 
+import json
 import os
+import sys
 import time
 
 from google import genai
 from google.genai import types
 
-from main import generate_cactus
+sys.path.insert(0, "cactus/python/src")
+from cactus import cactus_init, cactus_complete, cactus_destroy
+
+_FUNCTIONGEMMA_PATH = "cactus/weights/functiongemma-270m-it"
+
+
+def _generate_cactus_tuned(messages, tools):
+    """On-device inference with tuned cactus_complete parameters."""
+    model = cactus_init(_FUNCTIONGEMMA_PATH)
+
+    cactus_tools = [{"type": "function", "function": t} for t in tools]
+
+    raw_str = cactus_complete(
+        model,
+        [{"role": "system", "content": "You are a helpful assistant that can use tools."}] + messages,
+        tools=cactus_tools,
+        force_tools=True,
+        max_tokens=512,
+        temperature=0.2,
+        confidence_threshold=0.0,
+        tool_rag_top_k=0,
+        stop_sequences=["<end_of_turn>"],
+    )
+
+    cactus_destroy(model)
+
+    try:
+        raw = json.loads(raw_str)
+    except json.JSONDecodeError:
+        return {
+            "function_calls": [],
+            "total_time_ms": 0,
+            "confidence": 0,
+        }
+
+    return {
+        "function_calls": raw.get("function_calls", []),
+        "total_time_ms": raw.get("total_time_ms", 0),
+        "confidence": raw.get("confidence", 0),
+    }
 
 
 def _is_multi_action_request(messages):
@@ -55,14 +96,11 @@ def _should_fallback(local, messages, tools):
         if valid_tool_names and call["name"] not in valid_tool_names:
             return True, "unknown_tool_name"
 
-    # Gate 3: Empty calls — only fallback if multi-action or very low confidence.
+    # Gate 3: Empty calls — tools are available but local returned nothing.
+    # Local model often returns empty calls with high confidence (refusal behavior).
+    # Always fallback since an empty response is never correct when tools exist.
     if tools and not local_calls:
-        if _is_multi_action_request(messages):
-            return True, "empty_calls_multi_action"
-        if local_conf < 0.5:
-            return True, "empty_calls_very_low_conf"
-        # Single-action with moderate confidence: keep on-device.
-        return False, "empty_calls_kept_on_device"
+        return True, "empty_function_calls"
 
     # Gate 4: Required argument missing — hard schema violation.
     for call in local_calls:
@@ -101,6 +139,16 @@ def _should_fallback(local, messages, tools):
     # Gate 6: Multi-action under-call — local almost never gets multi-action right.
     if _is_multi_action_request(messages) and len(local_calls) < 2:
         return True, "multi_action_under_called"
+
+    # Gate 7: Tool-count gate — when many tools are available, local often picks
+    # the wrong one. Medium cases (*_among_*) typically have 3+ tools.
+    if len(tools) >= 3 and local_conf < 0.75:
+        return True, "many_tools_low_conf"
+
+    # Gate 8: Moderate confidence gate — even with 1-2 tools, very low confidence
+    # means local is likely semantically wrong despite valid structure.
+    if local_conf < 0.6:
+        return True, "low_confidence"
 
     # No fallback: keep on-device.
     return False, "on_device_ok"
@@ -154,7 +202,7 @@ def _generate_cloud(messages, tools, model_name):
 
 
 def generate_hybrid(messages, tools, confidence_threshold=0.99):
-    local = generate_cactus(messages, tools)
+    local = _generate_cactus_tuned(messages, tools)
     local_conf = local.get("confidence", 0)
     local_time_ms = local.get("total_time_ms", 0)
 
