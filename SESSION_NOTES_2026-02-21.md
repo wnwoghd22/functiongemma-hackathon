@@ -112,3 +112,21 @@ These rules are designed around failure types, not benchmark-specific phrases.
 ## 10) Operational Notes
 - Do not commit secrets from shell profiles (`GEMINI_API_KEY`, HF token).
 - Because benchmark behavior is stochastic, evaluate strategies with multiple runs where possible.
+
+## 11) Experiment Update: Minimal 5-Rule Routing
+- Implemented in:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/main.py` (`generate_hybrid` only)
+- Added rule gates:
+  - Output integrity
+  - Empty-call safety
+  - Argument sanity
+  - Multi-action under-calling
+  - Cost-aware cloud model routing (`gemini-2.5-flash-lite` default, `gemini-2.5-flash` escalation)
+- Benchmark result after rule insert (single run):
+  - overall avg F1: `0.94` (up from ~`0.24`)
+  - avg time: `1248ms` (up from ~`394ms`)
+  - on-device ratio: `20%` (down from `100%`)
+  - total score: `59.9%` (up from ~`40.0%`)
+- Interpretation:
+  - The rules strongly improved correctness by aggressively recovering local failure modes with cloud fallback.
+  - Latency and on-device ratio worsened, so next iteration should reduce unnecessary cloud routing on medium/hard cases where local is still usable.
