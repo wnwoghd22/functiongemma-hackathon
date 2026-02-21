@@ -31,8 +31,9 @@ except Exception:
 
 _FUNCTIONGEMMA_PATH = "cactus/weights/functiongemma-270m-it"
 _CACTUS_GLOBAL_MODEL = None
-_CLOUD_FALLBACK_TOOL_THRESHOLD = int(os.environ.get("CLOUD_FALLBACK_TOOL_THRESHOLD", "5"))
-_ENABLE_AGGRESSIVE_FALLBACK = os.environ.get("ENABLE_AGGRESSIVE_FALLBACK", "0") == "1"
+# Submission-safe fixed routing knobs (do not depend on local shell env).
+_CLOUD_FALLBACK_TOOL_THRESHOLD = 5
+_ENABLE_AGGRESSIVE_FALLBACK = False
 _ALWAYS_REEXTRACT_TOOLS = {"set_alarm", "set_timer", "get_weather"}
 
 _LOCAL_SYSTEM_PROMPT = (
@@ -912,14 +913,12 @@ def _generate_cloud(messages, tools):
     if not api_key:
         raise RuntimeError("missing_api_key")
 
-    models_to_try = []
-    for name in (
-        os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash-lite"),
-        os.environ.get("GEMINI_MODEL_FALLBACK_2", "gemini-2.5-flash"),
-        os.environ.get("GEMINI_MODEL_FALLBACK_3", "gemini-1.5-flash"),
-    ):
-        if name and name not in models_to_try:
-            models_to_try.append(name)
+    # Keep cloud model fallback order deterministic across local/server runs.
+    models_to_try = [
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-1.5-flash",
+    ]
 
     last_error = None
     for model_name in models_to_try:
