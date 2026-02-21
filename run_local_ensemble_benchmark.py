@@ -2,16 +2,16 @@ import sys
 import os
 
 import benchmark
-import strategies.strategy_high_efficiency as strategy
+import strategies.strategy_local_ensemble as strategy
 
 benchmark.generate_hybrid = strategy.generate_hybrid
 
 TIMESTAMP = os.popen('date +%Y%m%d_%H%M%S').read().strip()
-LOGFILE = f"benchmark_runs/benchmark_{TIMESTAMP}_high_efficiency.md"
+LOGFILE = f"benchmark_runs/benchmark_{TIMESTAMP}_local_ensemble.md"
 
 with open(LOGFILE, "w") as f:
     f.write(f"# Benchmark Run - {TIMESTAMP}\n")
-    f.write("## Strategy: High-Efficiency (Codex Improvements)\n")
+    f.write("## Strategy: Pure Local Ensemble\n")
     f.write("## Output\n```text\n")
 
 class DualOutput:

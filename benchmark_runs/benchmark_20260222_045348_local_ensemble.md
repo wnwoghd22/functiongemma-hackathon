@@ -1,0 +1,81 @@
+# Benchmark Run - 20260222_045348
+## Strategy: Pure Local Ensemble
+## Output
+```text
+[1/30] Running: weather_sf (easy)... F1=1.00 | 375ms | on-device
+[2/30] Running: alarm_10am (easy)... F1=1.00 | 881ms | on-device (retry 1)
+[3/30] Running: message_alice (easy)... F1=0.00 | 1177ms | on-device (failed validation)
+[4/30] Running: weather_london (easy)... F1=0.00 | 1157ms | on-device (failed validation)
+[5/30] Running: alarm_6am (easy)... F1=0.00 | 2196ms | on-device (failed validation)
+[6/30] Running: play_bohemian (easy)... F1=1.00 | 443ms | on-device
+[7/30] Running: timer_5min (easy)... F1=1.00 | 369ms | on-device
+[8/30] Running: reminder_meeting (easy)... F1=0.00 | 797ms | on-device
+[9/30] Running: search_bob (easy)... F1=1.00 | 745ms | on-device (retry 1)
+[10/30] Running: weather_paris (easy)... F1=0.00 | 1031ms | on-device (failed validation)
+[11/30] Running: message_among_three (medium)... F1=0.00 | 2580ms | on-device (retry 2)
+[12/30] Running: weather_among_two (medium)... F1=1.00 | 519ms | on-device
+[13/30] Running: alarm_among_three (medium)... F1=0.00 | 1972ms | on-device (failed validation)
+[14/30] Running: music_among_three (medium)... F1=0.00 | 1917ms | on-device (failed validation)
+[15/30] Running: reminder_among_four (medium)... F1=0.00 | 911ms | on-device
+[16/30] Running: timer_among_three (medium)... F1=1.00 | 507ms | on-device
+[17/30] Running: search_among_four (medium)... F1=0.00 | 2283ms | on-device (failed validation)
+[18/30] Running: weather_among_four (medium)... F1=1.00 | 611ms | on-device
+[19/30] Running: message_among_four (medium)... F1=0.00 | 3744ms | on-device (failed validation)
+[20/30] Running: alarm_among_five (medium)... F1=1.00 | 682ms | on-device
+[21/30] Running: message_and_weather (hard)... F1=0.00 | 2635ms | on-device (failed validation)
+[22/30] Running: alarm_and_weather (hard)... F1=0.00 | 1859ms | on-device (failed validation)
+[23/30] Running: timer_and_music (hard)... F1=0.00 | 1674ms | on-device (failed validation)
+[24/30] Running: reminder_and_message (hard)... F1=0.00 | 2044ms | on-device (failed validation)
+[25/30] Running: search_and_message (hard)... F1=0.67 | 1801ms | on-device (failed validation)
+[26/30] Running: alarm_and_reminder (hard)... F1=0.00 | 2402ms | on-device (failed validation)
+[27/30] Running: weather_and_music (hard)... F1=0.00 | 2112ms | on-device (failed validation)
+[28/30] Running: message_weather_alarm (hard)... F1=0.00 | 2543ms | on-device (failed validation)
+[29/30] Running: timer_music_reminder (hard)... F1=0.00 | 2523ms | on-device (failed validation)
+[30/30] Running: search_message_weather (hard)... F1=0.00 | 2538ms | on-device (failed validation)
+
+=== Benchmark Results ===
+
+   # | Difficulty | Name                         |  Time (ms) |    F1 | Source
+  ---+------------+------------------------------+------------+-------+---------------------
+   1 | easy       | weather_sf                   |     374.83 |  1.00 | on-device
+   2 | easy       | alarm_10am                   |     881.43 |  1.00 | on-device (retry 1)
+   3 | easy       | message_alice                |    1176.56 |  0.00 | on-device (failed validation)
+   4 | easy       | weather_london               |    1156.90 |  0.00 | on-device (failed validation)
+   5 | easy       | alarm_6am                    |    2196.34 |  0.00 | on-device (failed validation)
+   6 | easy       | play_bohemian                |     443.11 |  1.00 | on-device
+   7 | easy       | timer_5min                   |     369.08 |  1.00 | on-device
+   8 | easy       | reminder_meeting             |     796.64 |  0.00 | on-device
+   9 | easy       | search_bob                   |     744.51 |  1.00 | on-device (retry 1)
+  10 | easy       | weather_paris                |    1030.92 |  0.00 | on-device (failed validation)
+  11 | medium     | message_among_three          |    2580.12 |  0.00 | on-device (retry 2)
+  12 | medium     | weather_among_two            |     519.24 |  1.00 | on-device
+  13 | medium     | alarm_among_three            |    1971.96 |  0.00 | on-device (failed validation)
+  14 | medium     | music_among_three            |    1917.34 |  0.00 | on-device (failed validation)
+  15 | medium     | reminder_among_four          |     910.86 |  0.00 | on-device
+  16 | medium     | timer_among_three            |     507.19 |  1.00 | on-device
+  17 | medium     | search_among_four            |    2282.52 |  0.00 | on-device (failed validation)
+  18 | medium     | weather_among_four           |     611.16 |  1.00 | on-device
+  19 | medium     | message_among_four           |    3744.37 |  0.00 | on-device (failed validation)
+  20 | medium     | alarm_among_five             |     682.36 |  1.00 | on-device
+  21 | hard       | message_and_weather          |    2634.51 |  0.00 | on-device (failed validation)
+  22 | hard       | alarm_and_weather            |    1858.88 |  0.00 | on-device (failed validation)
+  23 | hard       | timer_and_music              |    1674.37 |  0.00 | on-device (failed validation)
+  24 | hard       | reminder_and_message         |    2043.94 |  0.00 | on-device (failed validation)
+  25 | hard       | search_and_message           |    1800.56 |  0.67 | on-device (failed validation)
+  26 | hard       | alarm_and_reminder           |    2402.38 |  0.00 | on-device (failed validation)
+  27 | hard       | weather_and_music            |    2111.91 |  0.00 | on-device (failed validation)
+  28 | hard       | message_weather_alarm        |    2543.32 |  0.00 | on-device (failed validation)
+  29 | hard       | timer_music_reminder         |    2523.37 |  0.00 | on-device (failed validation)
+  30 | hard       | search_message_weather       |    2538.16 |  0.00 | on-device (failed validation)
+
+--- Summary ---
+  easy     avg F1=0.50  avg time=917.03ms  on-device=4/10 cloud=6/10
+  medium   avg F1=0.40  avg time=1572.71ms  on-device=5/10 cloud=5/10
+  hard     avg F1=0.07  avg time=2213.14ms  on-device=0/10 cloud=10/10
+  overall  avg F1=0.32  avg time=1567.63ms  total time=47028.83ms
+           on-device=9/30 (30%)  cloud=21/30 (70%)
+
+==================================================
+  TOTAL SCORE: 20.9%
+==================================================
+```

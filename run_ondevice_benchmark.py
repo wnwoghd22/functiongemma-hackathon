@@ -1,17 +1,16 @@
+"""Benchmark runner for on-device only strategy (main.py v3.0)."""
 import sys
 import os
 
 import benchmark
-import strategies.strategy_high_efficiency as strategy
-
-benchmark.generate_hybrid = strategy.generate_hybrid
 
 TIMESTAMP = os.popen('date +%Y%m%d_%H%M%S').read().strip()
-LOGFILE = f"benchmark_runs/benchmark_{TIMESTAMP}_high_efficiency.md"
+os.makedirs("benchmark_runs", exist_ok=True)
+LOGFILE = f"benchmark_runs/benchmark_{TIMESTAMP}_ondevice_only.md"
 
 with open(LOGFILE, "w") as f:
     f.write(f"# Benchmark Run - {TIMESTAMP}\n")
-    f.write("## Strategy: High-Efficiency (Codex Improvements)\n")
+    f.write("## Strategy: On-Device Only v3.0\n")
     f.write("## Output\n```text\n")
 
 class DualOutput:
@@ -32,3 +31,5 @@ benchmark.run_benchmark(benchmark.BENCHMARKS)
 sys.stdout.file.write("```\n")
 sys.stdout.file.close()
 sys.stdout = sys.stdout.stdout
+
+print(f"\nResults saved to: {LOGFILE}")
