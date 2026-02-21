@@ -15,6 +15,7 @@ v2.2 changes:
 
 import json
 import os
+import re
 import sys
 import time
 
@@ -25,6 +26,56 @@ sys.path.insert(0, "cactus/python/src")
 from cactus import cactus_init, cactus_complete, cactus_destroy
 
 _FUNCTIONGEMMA_PATH = "cactus/weights/functiongemma-270m-it"
+_LOCAL_SYSTEM_PROMPT = (
+    "You are a strict function-calling router. "
+    "Output only function calls, never conversational text."
+)
+_CLOUD_SYSTEM_PROMPT = (
+    "Return only function calls. "
+    "Copy argument values from the user request as literally as possible. "
+    "Do not paraphrase names/messages and do not reformat time strings."
+)
+
+
+def _repair_json_payload(raw_str):
+    # Repair common malformed integer literals like :01 -> :1 before JSON parse.
+    return re.sub(r':\s*0(\d+)(?=\s*[,}\]])', r':\1', raw_str)
+
+
+def _sanitize_string_value(value):
+    return value.strip()
+
+
+def _sanitize_function_calls(function_calls, tools):
+    if not isinstance(function_calls, list):
+        return function_calls
+
+    sanitized_calls = []
+
+    for call in function_calls:
+        if not isinstance(call, dict):
+            sanitized_calls.append(call)
+            continue
+
+        name = call.get("name")
+        args = call.get("arguments")
+        if not isinstance(args, dict):
+            sanitized_calls.append(call)
+            continue
+
+        sanitized_args = {}
+
+        for key, value in args.items():
+            new_value = value
+
+            if isinstance(new_value, str):
+                new_value = _sanitize_string_value(new_value)
+
+            sanitized_args[key] = new_value
+
+        sanitized_calls.append({"name": name, "arguments": sanitized_args})
+
+    return sanitized_calls
 
 
 def _generate_cactus_tuned(messages, tools):
@@ -35,7 +86,7 @@ def _generate_cactus_tuned(messages, tools):
 
     raw_str = cactus_complete(
         model,
-        [{"role": "system", "content": "You are a helpful assistant that can use tools."}] + messages,
+        [{"role": "system", "content": _LOCAL_SYSTEM_PROMPT}] + messages,
         tools=cactus_tools,
         force_tools=True,
         max_tokens=512,
@@ -50,16 +101,27 @@ def _generate_cactus_tuned(messages, tools):
     try:
         raw = json.loads(raw_str)
     except json.JSONDecodeError:
-        return {
-            "function_calls": [],
-            "total_time_ms": 0,
-            "confidence": 0,
-        }
+        try:
+            raw = json.loads(_repair_json_payload(raw_str))
+        except json.JSONDecodeError:
+            return {
+                "function_calls": [],
+                "total_time_ms": 0,
+                "confidence": 0,
+                "cloud_handoff": False,
+                "success": False,
+                "prefill_tokens": 0,
+                "decode_tokens": 0
+            }
 
     return {
         "function_calls": raw.get("function_calls", []),
         "total_time_ms": raw.get("total_time_ms", 0),
         "confidence": raw.get("confidence", 0),
+        "cloud_handoff": raw.get("cloud_handoff", False),
+        "success": raw.get("success", True),
+        "prefill_tokens": raw.get("prefill_tokens", 0),
+        "decode_tokens": raw.get("decode_tokens", 0)
     }
 
 
@@ -77,9 +139,18 @@ def _should_fallback(local, messages, tools):
     local_calls = local.get("function_calls") or []
     local_conf = local.get("confidence", 0)
     local_time_ms = local.get("total_time_ms", 0)
+    cloud_handoff = local.get("cloud_handoff", False)
+    success = local.get("success", True)
+    prefill_tokens = local.get("prefill_tokens", 0)
 
     tool_by_name = {t.get("name"): t for t in tools if t.get("name")}
     valid_tool_names = set(tool_by_name.keys())
+
+    # Gate 0: Immediate Cactus Signals
+    if not success:
+        return True, "cactus_failure"
+    if cloud_handoff:
+        return True, "cloud_handoff_flag"
 
     # Gate 1: Parse failure sentinel — hard failure, must fallback.
     if local_conf == 0 and local_time_ms == 0 and not local_calls:
@@ -140,15 +211,16 @@ def _should_fallback(local, messages, tools):
     if _is_multi_action_request(messages) and len(local_calls) < 2:
         return True, "multi_action_under_called"
 
-    # Gate 7: Tool-count gate — when many tools are available, local often picks
-    # the wrong one. Medium cases (*_among_*) typically have 3+ tools.
-    if len(tools) >= 3 and local_conf < 0.75:
-        return True, "many_tools_low_conf"
-
-    # Gate 8: Moderate confidence gate — even with 1-2 tools, very low confidence
-    # means local is likely semantically wrong despite valid structure.
-    if local_conf < 0.6:
-        return True, "low_confidence"
+    # Gate 7: Multi-Signal Risk Score & Dynamic Confidence
+    expected_multi = _is_multi_action_request(messages)
+    is_simple = (not expected_multi) and (prefill_tokens <= 250) and (len(tools) <= 2)
+    
+    if is_simple:
+        if local_conf < 0.20:
+            return True, "low_confidence_simple"
+    else:
+        if local_conf < 0.75:
+            return True, "low_confidence_complex"
 
     # No fallback: keep on-device.
     return False, "on_device_ok"
@@ -179,7 +251,12 @@ def _generate_cloud(messages, tools, model_name):
     gemini_response = client.models.generate_content(
         model=model_name,
         contents=contents,
-        config=types.GenerateContentConfig(tools=gemini_tools),
+        config=types.GenerateContentConfig(
+            tools=gemini_tools,
+            temperature=0.0,
+            candidate_count=1,
+            system_instruction=_CLOUD_SYSTEM_PROMPT,
+        ),
     )
     total_time_ms = (time.time() - start_time) * 1000
 
@@ -196,19 +273,29 @@ def _generate_cloud(messages, tools, model_name):
                 })
 
     return {
-        "function_calls": function_calls,
+        "function_calls": _sanitize_function_calls(function_calls, tools),
         "total_time_ms": total_time_ms,
     }
 
 
+def _cloud_models_to_try():
+    models = []
+    for name in (
+        os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash-lite"),
+        os.environ.get("GEMINI_MODEL_SECONDARY", "gemini-2.5-flash"),
+        os.environ.get("GEMINI_MODEL_TERTIARY", ""),
+    ):
+        model_name = (name or "").strip()
+        if model_name and model_name not in models:
+            models.append(model_name)
+    return models
+
+
 def generate_hybrid(messages, tools, confidence_threshold=0.99):
     local = _generate_cactus_tuned(messages, tools)
+    local["function_calls"] = _sanitize_function_calls(local.get("function_calls") or [], tools)
     local_conf = local.get("confidence", 0)
     local_time_ms = local.get("total_time_ms", 0)
-
-    if getattr(generate_hybrid, "_disable_cloud_fallback", False):
-        local["source"] = "on-device"
-        return local
 
     needs_cloud, fallback_reason = _should_fallback(local, messages, tools)
     if not needs_cloud:
@@ -216,19 +303,25 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
         local["fallback_reason"] = fallback_reason
         return local
 
-    # Single cloud model — gemini-2.5-flash-lite for speed.
-    fallback_model = os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash-lite")
-    try:
-        cloud = _generate_cloud(messages, tools, fallback_model)
-        cloud["source"] = "cloud (fallback)"
-        cloud["local_confidence"] = local_conf
-        cloud["total_time_ms"] += local_time_ms
-        cloud["fallback_reason"] = fallback_reason
-        cloud["cloud_model"] = fallback_model
-        return cloud
-    except Exception as e:
-        generate_hybrid._disable_cloud_fallback = True
-        local["source"] = "on-device"
-        local["fallback_reason"] = fallback_reason
-        local["cloud_error"] = str(e)
-        return local
+    # Try multiple cloud models. Do not permanently disable cloud fallback.
+    models_to_try = _cloud_models_to_try()
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            cloud = _generate_cloud(messages, tools, model_name)
+            cloud["source"] = "cloud (fallback)"
+            cloud["local_confidence"] = local_conf
+            cloud["total_time_ms"] += local_time_ms
+            cloud["fallback_reason"] = fallback_reason
+            cloud["cloud_model"] = model_name
+            return cloud
+        except Exception as e:
+            last_error = e
+
+    local["source"] = "on-device"
+    local["fallback_reason"] = fallback_reason
+    if models_to_try:
+        local["cloud_models_tried"] = models_to_try
+    if last_error is not None:
+        local["cloud_error"] = str(last_error)
+    return local
