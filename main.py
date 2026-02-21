@@ -98,15 +98,27 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
     """Baseline hybrid inference strategy; fall back to cloud if Cactus Confidence is below threshold."""
     local = generate_cactus(messages, tools)
 
+    # If cloud fallback was already observed to fail, stay on-device for the rest of this run.
+    if getattr(generate_hybrid, "_disable_cloud_fallback", False):
+        local["source"] = "on-device"
+        return local
+
     if local["confidence"] >= confidence_threshold:
         local["source"] = "on-device"
         return local
 
-    cloud = generate_cloud(messages, tools)
-    cloud["source"] = "cloud (fallback)"
-    cloud["local_confidence"] = local["confidence"]
-    cloud["total_time_ms"] += local["total_time_ms"]
-    return cloud
+    try:
+        cloud = generate_cloud(messages, tools)
+        cloud["source"] = "cloud (fallback)"
+        cloud["local_confidence"] = local["confidence"]
+        cloud["total_time_ms"] += local["total_time_ms"]
+        return cloud
+    except Exception as e:
+        # Keep benchmark running even if cloud model/config is unavailable.
+        generate_hybrid._disable_cloud_fallback = True
+        local["source"] = "on-device"
+        local["cloud_error"] = str(e)
+        return local
 
 
 def print_result(label, result):
