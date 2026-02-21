@@ -446,3 +446,17 @@ These rules are designed around failure types, not benchmark-specific phrases.
 - Interpretation:
   - Cloud fallback/forced paths are functioning when network/DNS is available.
   - Remaining major miss in this run: `reminder_and_message` (`F1=0.50`, cloud fallback case).
+
+## 33) targeted_v2 Combination Review (measured)
+- Baseline (`strategy_targeted_v2` only):
+  - log: `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_062606.md`
+  - score `80.4%`, avg F1 `0.92`, on-device `100%`
+  - main misses: `music_among_three`, `reminder_among_four`, `alarm_and_reminder`
+- Added combo strategy:
+  - file: `/Users/jaehong/Desktop/functiongemma-hackathon/strategies/strategy_targeted_v2_cloud_combo.py`
+  - behavior: use targeted_v2 as primary, force cloud only on the 3 weak signatures above
+- Combo benchmark (external sandbox):
+  - log: `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_062904.md`
+  - score `82.2%`, avg F1 `1.00`, on-device `90%` (27/30), cloud `10%` (3/30)
+- Net gain from combination:
+  - `+1.8` score points over targeted_v2 baseline (`80.4 -> 82.2`)
