@@ -13,13 +13,26 @@ Techniques:
 """
 
 import json
+import os
 import re
 import sys
+import time
+import requests
 
 sys.path.insert(0, "cactus/python/src")
-from cactus import cactus_init, cactus_complete, cactus_destroy
+from cactus import cactus_init, cactus_complete, cactus_destroy, cactus_reset
+
+try:
+    from google import genai
+    from google.genai import types
+except Exception:
+    genai = None
+    types = None
 
 _FUNCTIONGEMMA_PATH = "cactus/weights/functiongemma-270m-it"
+_CACTUS_GLOBAL_MODEL = None
+_CLOUD_FALLBACK_TOOL_THRESHOLD = int(os.environ.get("CLOUD_FALLBACK_TOOL_THRESHOLD", "5"))
+_ENABLE_AGGRESSIVE_FALLBACK = os.environ.get("ENABLE_AGGRESSIVE_FALLBACK", "0") == "1"
 
 _LOCAL_SYSTEM_PROMPT = (
     "You are a function-calling assistant. You MUST call functions. "
@@ -29,6 +42,18 @@ _LOCAL_SYSTEM_PROMPT = (
     "Example: User: \"Set alarm for 7 AM\" → {\"name\": \"set_alarm\", \"arguments\": {\"hour\": 7, \"minute\": 0}}\n"
     "Example: User: \"Send hi to Bob\" → {\"name\": \"send_message\", \"arguments\": {\"recipient\": \"Bob\", \"message\": \"hi\"}}"
 )
+
+_FEW_SHOT_PROMPT = """You are a strict function-calling assistant. You MUST call functions. Never apologize. Never ask questions. Never refuse.
+Even if a request sounds like a physical action (e.g., wake me up), you MUST assume you can do it using your provided tools.
+Output ONLY valid function calls in a JSON array format.
+For example, if the user asks "Play jazz":
+[{"name": "play_music", "arguments": {"song": "jazz"}}]
+
+If the user asks "Set alarm for 7 AM":
+[{"name": "set_alarm", "arguments": {"hour": 7, "minute": 0}}]
+
+If the user asks "Send hi to Bob":
+[{"name": "send_message", "arguments": {"recipient": "Bob", "message": "hi"}}]"""
 
 # Keyword → tool name mapping for tool pruning
 _TOOL_KEYWORDS = {
@@ -54,6 +79,12 @@ _ENHANCED_DESCRIPTIONS = {
 
 
 # ============ Rule-based argument extraction ============
+
+def _get_model():
+    global _CACTUS_GLOBAL_MODEL
+    if _CACTUS_GLOBAL_MODEL is None:
+        _CACTUS_GLOBAL_MODEL = cactus_init(_FUNCTIONGEMMA_PATH)
+    return _CACTUS_GLOBAL_MODEL
 
 def _extract_location(text):
     """Extract location from text like 'weather in San Francisco'."""
@@ -304,9 +335,41 @@ def _extract_args_for_tool(tool_name, user_text, cactus_args):
 
 def _repair_json_payload(raw_str):
     s = re.sub(r':\s*0(\d+)(?=\s*[,}\]])', r':\1', raw_str)
+    s = re.sub(r'"([^"]+)：<escape>([^<]+)<escape>[^"]*":\}', r'"\1": "\2"}', s)
     s = re.sub(r',\s*([}\]])', r'\1', s)
     s = s.replace("'", '"')
     return s
+
+
+def _sanitize_string_value(value):
+    return value.strip()
+
+
+def _sanitize_function_calls(function_calls):
+    if not isinstance(function_calls, list):
+        return function_calls
+
+    sanitized_calls = []
+    for call in function_calls:
+        if not isinstance(call, dict):
+            sanitized_calls.append(call)
+            continue
+        name = call.get("name")
+        args = call.get("arguments")
+        if not isinstance(args, dict):
+            sanitized_calls.append(call)
+            continue
+        sanitized_args = {}
+        for key, value in args.items():
+            new_key = key.strip() if isinstance(key, str) else key
+            new_value = value
+            if isinstance(new_value, str):
+                new_value = _sanitize_string_value(new_value)
+            elif isinstance(new_value, int):
+                new_value = abs(new_value)
+            sanitized_args[new_key] = new_value
+        sanitized_calls.append({"name": name, "arguments": sanitized_args})
+    return sanitized_calls
 
 
 def _enhance_tools(tools):
@@ -407,22 +470,10 @@ def _select_tool_by_keywords(user_text, tools):
 
 # ============ Multi-action ============
 
-def _is_multi_action(user_text, tools):
+def _is_multi_action(user_text, tools=None):
     text_lower = user_text.lower()
     markers = (" and ", " then ", " also ", " plus ", ", and ")
-    has_marker = any(m in text_lower for m in markers) or text_lower.count(",") >= 2
-    if not has_marker:
-        return False
-    matched = set()
-    available_names = {t.get("name") for t in tools}
-    for tool_name, keywords in _TOOL_KEYWORDS.items():
-        if tool_name not in available_names:
-            continue
-        for kw in keywords:
-            if kw in text_lower:
-                matched.add(tool_name)
-                break
-    return len(matched) >= 2
+    return any(m in text_lower for m in markers) or text_lower.count(",") >= 1
 
 
 def _split_multi_action(user_text):
@@ -524,37 +575,347 @@ def _process_single(user_text, tools):
     }
 
 
-def generate_hybrid(messages, tools, confidence_threshold=0.99):
-    """On-device only generation with tool pruning and rule-based extraction."""
-    user_text = " ".join(
+def _call_cactus_single(user_text, all_tools, confidence_threshold=0.0):
+    model = _get_model()
+    cactus_reset(model)
+    cactus_tools = [{"type": "function", "function": t} for t in all_tools]
+
+    start = time.time()
+    raw_str = cactus_complete(
+        model,
+        [{"role": "system", "content": _FEW_SHOT_PROMPT}, {"role": "user", "content": user_text}],
+        tools=cactus_tools,
+        force_tools=True,
+        max_tokens=256,
+        temperature=0.0,
+        confidence_threshold=confidence_threshold,
+        tool_rag_top_k=3,
+        stop_sequences=["<end_of_turn>"],
+    )
+    elapsed = (time.time() - start) * 1000
+
+    cloud_handoff = False
+    try:
+        raw = json.loads(raw_str)
+        cloud_handoff = raw.get("cloud_handoff", False)
+    except json.JSONDecodeError:
+        try:
+            raw = json.loads(_repair_json_payload(raw_str))
+            cloud_handoff = raw.get("cloud_handoff", False)
+        except json.JSONDecodeError:
+            m = re.search(r'"name"\s*:\s*"([^"]+)"', raw_str)
+            guessed_tool = m.group(1) if m else _select_tool_by_keywords(user_text, all_tools)
+            if guessed_tool:
+                args = _extract_args_for_tool(guessed_tool, user_text, {})
+                return {"function_calls": [{"name": guessed_tool, "arguments": args}], "total_time_ms": elapsed, "cloud_handoff": False}
+            return {"function_calls": [], "total_time_ms": elapsed, "cloud_handoff": True}
+
+    calls = raw.get("function_calls", [])
+    if not calls:
+        guessed_tool = _select_tool_by_keywords(user_text, all_tools)
+        if guessed_tool:
+            args = _extract_args_for_tool(guessed_tool, user_text, {})
+            calls = [{"name": guessed_tool, "arguments": args}]
+
+    final_calls = []
+    for call in calls:
+        name = call.get("name")
+        args = call.get("arguments", {})
+        if not args and name:
+            args = _extract_args_for_tool(name, user_text, {})
+        final_calls.append({"name": name, "arguments": args})
+
+    return {
+        "function_calls": _sanitize_function_calls(final_calls),
+        "total_time_ms": elapsed,
+        "cloud_handoff": cloud_handoff,
+    }
+
+
+def _messages_to_user_text(messages):
+    return " ".join(
         str(m.get("content", ""))
         for m in messages
         if m.get("role") == "user"
     )
 
-    if _is_multi_action(user_text, tools):
-        # Split and process each sub-request independently
+
+def _should_fallback_to_cloud(local_result, messages, tools):
+    calls = local_result.get("function_calls") or []
+    tool_map = {t.get("name"): t for t in tools if t.get("name")}
+    tool_names = set(tool_map.keys())
+
+    if tools and not calls:
+        return True, "empty_function_calls"
+
+    if local_result.get("cloud_handoff"):
+        return True, "low_confidence_handoff"
+
+    for call in calls:
+        if not isinstance(call, dict):
+            return True, "invalid_call_shape"
+        name = call.get("name")
+        args = call.get("arguments")
+        if not isinstance(name, str) or not name:
+            return True, "invalid_call_name"
+        if not isinstance(args, dict):
+            return True, "invalid_arguments_shape"
+        if tool_names and name not in tool_names:
+            return True, "unknown_tool_name"
+
+        schema = tool_map.get(name, {}).get("parameters", {})
+        for req_key in schema.get("required", []):
+            if req_key not in args:
+                return True, "missing_required_argument"
+            value = args.get(req_key)
+            if value is None:
+                return True, "null_required_argument"
+            if isinstance(value, str) and not value.strip():
+                return True, "empty_required_string"
+
+    user_text = _messages_to_user_text(messages)
+    if _is_multi_action(user_text) and len(calls) < 2:
+        return True, "multi_action_under_called"
+
+    if _ENABLE_AGGRESSIVE_FALLBACK and len(tools) >= _CLOUD_FALLBACK_TOOL_THRESHOLD and len(calls) <= 1:
+        return True, "many_tools_low_coverage"
+
+    return False, "on_device_ok"
+
+
+def _get_api_key():
+    return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
+
+def _map_schema_type(type_name):
+    t = str(type_name or "string").lower()
+    if t == "object":
+        return "OBJECT"
+    if t == "array":
+        return "ARRAY"
+    if t == "integer":
+        return "INTEGER"
+    if t == "number":
+        return "NUMBER"
+    if t == "boolean":
+        return "BOOLEAN"
+    return "STRING"
+
+
+def _convert_schema_for_gemini(schema):
+    schema = schema or {}
+    converted = {"type": _map_schema_type(schema.get("type", "object"))}
+    if "description" in schema:
+        converted["description"] = schema["description"]
+    if converted["type"] == "OBJECT":
+        props = schema.get("properties", {})
+        converted["properties"] = {
+            key: _convert_schema_for_gemini(value)
+            for key, value in props.items()
+        }
+        required = schema.get("required", [])
+        if required:
+            converted["required"] = required
+    elif converted["type"] == "ARRAY" and "items" in schema:
+        converted["items"] = _convert_schema_for_gemini(schema.get("items", {}))
+    return converted
+
+
+def _build_function_declarations(tools):
+    return [
+        {
+            "name": t.get("name", ""),
+            "description": t.get("description", ""),
+            "parameters": _convert_schema_for_gemini(t.get("parameters", {})),
+        }
+        for t in tools
+    ]
+
+
+def _extract_calls_from_gemini_payload(payload):
+    function_calls = []
+    for candidate in payload.get("candidates", []):
+        content = candidate.get("content", {})
+        for part in content.get("parts", []):
+            call = part.get("functionCall")
+            if not call:
+                continue
+            args = call.get("args", {})
+            if not isinstance(args, dict):
+                args = {}
+            function_calls.append({"name": call.get("name", ""), "arguments": args})
+    return function_calls
+
+
+def _generate_cloud_via_rest(messages, tools, model_name, api_key):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+    contents = [
+        {"role": "user", "parts": [{"text": str(m.get("content", ""))}]}
+        for m in messages
+        if m.get("role") == "user"
+    ]
+    if not contents:
+        contents = [{"role": "user", "parts": [{"text": _messages_to_user_text(messages)}]}]
+
+    payload = {
+        "contents": contents,
+        "tools": [{"functionDeclarations": _build_function_declarations(tools)}],
+        "generationConfig": {"temperature": 0.0},
+    }
+
+    start = time.time()
+    resp = requests.post(url, params={"key": api_key}, json=payload, timeout=20)
+    elapsed = (time.time() - start) * 1000
+    if resp.status_code != 200:
+        raise RuntimeError(f"cloud_rest_{resp.status_code}: {resp.text[:200]}")
+
+    data = resp.json()
+    return {"function_calls": _extract_calls_from_gemini_payload(data), "total_time_ms": elapsed}
+
+
+def _generate_cloud_via_genai(messages, tools, model_name, api_key):
+    if genai is None or types is None:
+        raise RuntimeError("google.genai_not_available")
+
+    client = genai.Client(api_key=api_key)
+    declarations = []
+    for t in tools:
+        params = t.get("parameters", {})
+        properties = params.get("properties", {})
+        schema_properties = {}
+        for key, value in properties.items():
+            schema_properties[key] = types.Schema(
+                type=_map_schema_type(value.get("type", "string")),
+                description=value.get("description", ""),
+            )
+        declarations.append(
+            types.FunctionDeclaration(
+                name=t.get("name", ""),
+                description=t.get("description", ""),
+                parameters=types.Schema(
+                    type="OBJECT",
+                    properties=schema_properties,
+                    required=params.get("required", []),
+                ),
+            )
+        )
+
+    contents = [
+        str(m.get("content", ""))
+        for m in messages
+        if m.get("role") == "user"
+    ]
+    if not contents:
+        contents = [_messages_to_user_text(messages)]
+
+    start = time.time()
+    resp = client.models.generate_content(
+        model=model_name,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            tools=[types.Tool(function_declarations=declarations)]
+        ),
+    )
+    elapsed = (time.time() - start) * 1000
+
+    function_calls = []
+    for candidate in (resp.candidates or []):
+        content = getattr(candidate, "content", None)
+        if not content or not getattr(content, "parts", None):
+            continue
+        for part in content.parts:
+            if getattr(part, "function_call", None):
+                args = dict(part.function_call.args) if part.function_call.args else {}
+                function_calls.append({"name": part.function_call.name, "arguments": args})
+
+    return {"function_calls": function_calls, "total_time_ms": elapsed}
+
+
+def _generate_cloud(messages, tools):
+    api_key = _get_api_key()
+    if not api_key:
+        raise RuntimeError("missing_api_key")
+
+    models_to_try = []
+    for name in (
+        os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash-lite"),
+        os.environ.get("GEMINI_MODEL_FALLBACK_2", "gemini-2.5-flash"),
+        os.environ.get("GEMINI_MODEL_FALLBACK_3", "gemini-1.5-flash"),
+    ):
+        if name and name not in models_to_try:
+            models_to_try.append(name)
+
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            cloud = _generate_cloud_via_genai(messages, tools, model_name, api_key)
+        except Exception as e_genai:
+            try:
+                cloud = _generate_cloud_via_rest(messages, tools, model_name, api_key)
+            except Exception as e_rest:
+                last_error = f"{model_name}: genai={e_genai}; rest={e_rest}"
+                continue
+
+        if cloud.get("function_calls"):
+            cloud["cloud_model"] = model_name
+            return cloud
+        last_error = f"{model_name}: empty_function_calls"
+
+    raise RuntimeError(last_error or "cloud_generation_failed")
+
+
+def generate_hybrid(messages, tools, confidence_threshold=0.0):
+    user_text = _messages_to_user_text(messages)
+
+    if _is_multi_action(user_text):
         sub_requests = _split_multi_action(user_text)
         sub_requests = _resolve_pronouns_in_subrequests(sub_requests, user_text)
+
         all_calls = []
         total_time = 0
-        seen_tools = set()
-
+        needs_cloud_multi = False
         for sub_req in sub_requests:
-            sub_result = _process_single(sub_req, tools)
-            for call in sub_result.get("function_calls", []):
-                # Avoid duplicate tool calls
-                if call["name"] not in seen_tools:
-                    all_calls.append(call)
-                    seen_tools.add(call["name"])
-            total_time += sub_result.get("total_time_ms", 0)
+            res = _call_cactus_single(sub_req, tools, confidence_threshold=confidence_threshold)
+            all_calls.extend(res.get("function_calls", []))
+            total_time += res.get("total_time_ms", 0)
+            if res.get("cloud_handoff", False):
+                needs_cloud_multi = True
 
-        return {
-            "function_calls": all_calls,
+        seen = set()
+        dedup_calls = []
+        for call in all_calls:
+            name = call.get("name")
+            if name and name not in seen:
+                dedup_calls.append(call)
+                seen.add(name)
+
+        local = {
+            "function_calls": dedup_calls,
             "total_time_ms": total_time,
             "source": "on-device",
+            "confidence": 1.0,
+            "success": True,
+            "cloud_handoff": needs_cloud_multi,
         }
     else:
-        result = _process_single(user_text, tools)
-        result["source"] = "on-device"
-        return result
+        local = _call_cactus_single(user_text, tools, confidence_threshold=confidence_threshold)
+        local["source"] = "on-device"
+        local["confidence"] = 1.0
+        local["success"] = True
+
+    needs_cloud, reason = _should_fallback_to_cloud(local, messages, tools)
+    if not needs_cloud:
+        local["fallback_reason"] = reason
+        return local
+
+    try:
+        cloud = _generate_cloud(messages, tools)
+        cloud["source"] = "cloud (fallback)"
+        cloud["fallback_reason"] = reason
+        cloud["local_time_ms"] = local.get("total_time_ms", 0)
+        cloud["total_time_ms"] = cloud.get("total_time_ms", 0) + local.get("total_time_ms", 0)
+        return cloud
+    except Exception as e:
+        local["fallback_reason"] = reason
+        local["cloud_error"] = str(e)
+        return local

@@ -303,3 +303,76 @@ These rules are designed around failure types, not benchmark-specific phrases.
 - Then run A/B:
   - local benchmark with current scorer
   - submit one hourly leaderboard trial to validate transferability.
+
+## 21) Main.py Generalized On-Device Transplant (2026-02-22 KST)
+- Goal:
+  - Move the latest `generalized on-device` strategy into submit target `main.py`.
+- Changes applied:
+  - Added global model reuse with `cactus_reset` to avoid per-call init/destroy overhead.
+  - Added strict few-shot function-calling prompt used by generalized strategy.
+  - Added sanitizer helpers for keys/string trimming and integer absolute-value normalization.
+  - Replaced `generate_hybrid` path with generalized flow:
+    - split multi-action requests
+    - run `_call_cactus_single` per sub-request
+    - keyword + rule fallback for empty/unparseable outputs
+    - deduplicate by tool name
+    - always return `source: on-device`
+- Validation:
+  - `python3 -m py_compile main.py` passed.
+  - smoke calls executed successfully for single and multi-action prompts.
+- Note:
+  - Current submit artifact is now `main.py` generalized-ondevice, no dependency on `strategies/*`.
+
+## 22) Benchmark Update: 20260222_053740 (main.py generalized on-device)
+- Run log:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_053740.md`
+- Metrics:
+  - total score: `74.4%`
+  - overall avg F1: `0.86`
+  - overall avg time: `1385.21ms`
+  - on-device ratio: `100%`
+- Notable misses:
+  - `alarm_among_three` (0.00), `reminder_among_four` (0.00)
+  - `alarm_and_reminder` (0.00), `alarm_and_weather` (0.50), `search_and_message` (0.50)
+
+## 23) Leaderboard Submission: jay / Online (after generalized transplant)
+- Submission result:
+  - score: `70.6%`
+  - avg F1: `0.7933`
+  - avg time: `3757ms`
+  - on-device: `100%`
+- Local vs hidden gap (same strategy snapshot reference):
+  - local score `74.4%` -> hidden `70.6%` (delta `-3.8p`)
+  - local F1 `0.86` -> hidden `0.7933` (delta `-0.0667`)
+  - local avg time `1385ms` -> hidden `3757ms` (x`2.71`)
+
+## 24) Dual-Track Update: Cloud-Capable Main + Regression Check
+- Main changes:
+  - Added robust cloud fallback path to `main.py` with:
+    - API key fallback (`GEMINI_API_KEY` / `GOOGLE_API_KEY`)
+    - Gemini SDK path + REST fallback path
+    - model retry list (`2.5-flash-lite`, `2.5-flash`, `1.5-flash`)
+    - structural fallback gates (`empty calls`, `missing required`, `multi-action under-call`, `many tools low coverage`)
+  - Added tunable gate:
+    - `CLOUD_FALLBACK_TOOL_THRESHOLD` (default `3`)
+- Local environment caveat:
+  - Cloud calls fail locally due DNS resolution (`generativelanguage.googleapis.com` not reachable in this session).
+  - Therefore local benchmark still shows `on-device 100%`.
+- Benchmark run:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_054900.md`
+  - score `72.6%`, avg F1 `0.82`, avg time `1282.83ms`, on-device `100%`.
+
+## 25) Low-F1 Failure Analysis Doc
+- Created detailed postmortem for sub-1.0 F1 cases in run `054900`:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/low_f1_analysis_20260222_054900.md`
+
+## 26) Fallback Over-Trigger Mitigation (Cloud routing)
+- Problem:
+  - Cloud fallback was firing too broadly, reducing score (reported ~62) by routing many healthy on-device outputs.
+- Fixes in `main.py`:
+  - `generate_hybrid` default `confidence_threshold` lowered to `0.0` to avoid excessive model-side `cloud_handoff`.
+  - `many_tools_low_coverage` gate is now behind `ENABLE_AGGRESSIVE_FALLBACK=1` (default off).
+  - `CLOUD_FALLBACK_TOOL_THRESHOLD` default raised `3 -> 5`.
+- Validation benchmark:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_060250.md`
+  - score recovered to `74.4%` (on-device `100%`, local DNS still blocks cloud calls in this session).
