@@ -162,3 +162,51 @@ These rules are designed around failure types, not benchmark-specific phrases.
   - single-call cases naturally collapse to mostly `0` or `1`
   - partial values like `0.67` mainly appear in multi-call cases (e.g., 1/2 matched)
   - parse failures often become immediate `0` because local fallback object has empty calls
+
+## 14) Full On-Device vs Full-Cloud Comparison (Feature Extraction)
+- Re-measured with:
+  - full on-device: `generate_cactus` only
+  - full cloud: `gemini-2.5-flash-lite` only
+- Global snapshot:
+  - local avg F1: `0.2444`
+  - cloud avg F1: `0.9111`
+  - local avg time: `403.98ms`
+  - cloud avg time: `1178.02ms`
+  - local score-like: `39.99`
+  - cloud score-like: `55.0`
+
+### Cross-outcome counts
+- both correct: `6`
+- local-only correct: `0`
+- cloud-only correct: `20`
+- both not perfect: `4`
+
+### Traits of on-device strong tasks
+- On-device perfect cases were all `single-action` (`expected_calls=1`).
+- On-device perfect cases were all `multi_action=False`.
+- Typical successful signatures:
+  - `('get_weather',)` (some cases)
+  - `('play_music',)`
+  - `('set_timer',)` / `('set_alarm',)` in limited settings
+- For multi-call tasks (`expected_calls >= 2`), on-device perfect rate was effectively `0.00`.
+
+### Traits of cloud-gain tasks
+- Biggest gains concentrated in:
+  - `multi_action=True`
+  - `expected_calls=2 or 3`
+  - signatures including `send_message`, `search_contacts`, `create_reminder`
+- Cloud still not guaranteed perfect due to strict string/value matching (e.g., punctuation or phrasing differences).
+
+### Aggregated feature view (perfect-rate)
+- by `multi_action`:
+  - local: `False=0.30`, `True=0.00`
+  - cloud: `False=0.90`, `True=0.80`
+- by `n_expected_calls`:
+  - local: `1=0.30`, `2=0.00`, `3=0.00`
+  - cloud: `1=0.90`, `2=0.86`, `3=0.67`
+
+### Strategic implication
+- Routing should avoid one-size-fits-all:
+  - keep clearly single/simple cases on-device
+  - escalate multi-action and communication-heavy tasks to cloud
+- This split is more robust than case-specific hardcoding and aligns with hidden-eval generalization goals.
