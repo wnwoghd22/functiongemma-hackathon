@@ -1,66 +1,18 @@
-"""Selective routing strategy v2.2: cactus_complete parameter tuning for on-device ratio.
+"""Selective routing strategy v2.1 (reconstructed).
 
-v2.1: F1=0.96, on-device=20%, score=60.9%
-
-v2.2 changes:
-- Direct cactus_complete call with tuned parameters:
-  - confidence_threshold=0.0 (prevent early cloud_handoff on first-token uncertainty)
-  - temperature=0.2 (escape greedy decoding refusal traps)
-  - tool_rag_top_k=0 (disable tool filtering, include all tools in prompt)
-  - max_tokens=512 (more token space for multi-call attempts)
-  - Remove <|im_end|> stop sequence (unnecessary for Gemma)
-- Routing gates unchanged from v2.1.
-- Target: on-device 25-35%, F1 maintained.
+Target profile from previous run:
+- high F1 with structural-first fallback
+- empty calls always fallback
+- cloud model: gemini-2.5-flash-lite
 """
 
-import json
 import os
-import sys
 import time
 
 from google import genai
 from google.genai import types
 
-sys.path.insert(0, "cactus/python/src")
-from cactus import cactus_init, cactus_complete, cactus_destroy
-
-_FUNCTIONGEMMA_PATH = "cactus/weights/functiongemma-270m-it"
-
-
-def _generate_cactus_tuned(messages, tools):
-    """On-device inference with tuned cactus_complete parameters."""
-    model = cactus_init(_FUNCTIONGEMMA_PATH)
-
-    cactus_tools = [{"type": "function", "function": t} for t in tools]
-
-    raw_str = cactus_complete(
-        model,
-        [{"role": "system", "content": "You are a helpful assistant that can use tools."}] + messages,
-        tools=cactus_tools,
-        force_tools=True,
-        max_tokens=512,
-        temperature=0.2,
-        confidence_threshold=0.0,
-        tool_rag_top_k=0,
-        stop_sequences=["<end_of_turn>"],
-    )
-
-    cactus_destroy(model)
-
-    try:
-        raw = json.loads(raw_str)
-    except json.JSONDecodeError:
-        return {
-            "function_calls": [],
-            "total_time_ms": 0,
-            "confidence": 0,
-        }
-
-    return {
-        "function_calls": raw.get("function_calls", []),
-        "total_time_ms": raw.get("total_time_ms", 0),
-        "confidence": raw.get("confidence", 0),
-    }
+from main import generate_cactus
 
 
 def _is_multi_action_request(messages):
@@ -81,11 +33,11 @@ def _should_fallback(local, messages, tools):
     tool_by_name = {t.get("name"): t for t in tools if t.get("name")}
     valid_tool_names = set(tool_by_name.keys())
 
-    # Gate 1: Parse failure sentinel — hard failure, must fallback.
+    # Gate 1: Parse failure sentinel — hard failure.
     if local_conf == 0 and local_time_ms == 0 and not local_calls:
         return True, "parse_fail_sentinel"
 
-    # Gate 2: Structural integrity — malformed calls.
+    # Gate 2: Structural integrity.
     for call in local_calls:
         if not isinstance(call, dict):
             return True, "invalid_call_shape"
@@ -96,13 +48,11 @@ def _should_fallback(local, messages, tools):
         if valid_tool_names and call["name"] not in valid_tool_names:
             return True, "unknown_tool_name"
 
-    # Gate 3: Empty calls — tools are available but local returned nothing.
-    # Local model often returns empty calls with high confidence (refusal behavior).
-    # Always fallback since an empty response is never correct when tools exist.
+    # Gate 3: Empty calls with tools => fallback.
     if tools and not local_calls:
         return True, "empty_function_calls"
 
-    # Gate 4: Required argument missing — hard schema violation.
+    # Gate 4: Required argument checks.
     for call in local_calls:
         schema = tool_by_name.get(call["name"], {}).get("parameters", {})
         required = schema.get("required", [])
@@ -116,7 +66,7 @@ def _should_fallback(local, messages, tools):
             if isinstance(value, str) and not value.strip():
                 return True, "empty_required_string"
 
-    # Gate 5: Time-field sanity — only obviously wrong values.
+    # Gate 5: Time-field sanity.
     for call in local_calls:
         schema = tool_by_name.get(call["name"], {}).get("parameters", {})
         properties = schema.get("properties", {})
@@ -136,21 +86,18 @@ def _should_fallback(local, messages, tools):
                     if key in ("minutes", "seconds", "duration") and v < 0:
                         return True, "negative_time_value"
 
-    # Gate 6: Multi-action under-call — local almost never gets multi-action right.
+    # Gate 6: Multi-action under-call.
     if _is_multi_action_request(messages) and len(local_calls) < 2:
         return True, "multi_action_under_called"
 
-    # Gate 7: Tool-count gate — when many tools are available, local often picks
-    # the wrong one. Medium cases (*_among_*) typically have 3+ tools.
+    # Gate 7: Tool-count ambiguity gate.
     if len(tools) >= 3 and local_conf < 0.75:
         return True, "many_tools_low_conf"
 
-    # Gate 8: Moderate confidence gate — even with 1-2 tools, very low confidence
-    # means local is likely semantically wrong despite valid structure.
+    # Gate 8: Low confidence fallback.
     if local_conf < 0.6:
         return True, "low_confidence"
 
-    # No fallback: keep on-device.
     return False, "on_device_ok"
 
 
@@ -202,7 +149,7 @@ def _generate_cloud(messages, tools, model_name):
 
 
 def generate_hybrid(messages, tools, confidence_threshold=0.99):
-    local = _generate_cactus_tuned(messages, tools)
+    local = generate_cactus(messages, tools)
     local_conf = local.get("confidence", 0)
     local_time_ms = local.get("total_time_ms", 0)
 
@@ -216,7 +163,6 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
         local["fallback_reason"] = fallback_reason
         return local
 
-    # Single cloud model — gemini-2.5-flash-lite for speed.
     fallback_model = os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash-lite")
     try:
         cloud = _generate_cloud(messages, tools, fallback_model)
