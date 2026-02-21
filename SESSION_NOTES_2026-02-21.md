@@ -460,3 +460,31 @@ These rules are designed around failure types, not benchmark-specific phrases.
   - score `82.2%`, avg F1 `1.00`, on-device `90%` (27/30), cloud `10%` (3/30)
 - Net gain from combination:
   - `+1.8` score points over targeted_v2 baseline (`80.4 -> 82.2`)
+
+## 34) Fallback Reachability Re-Check (main.py)
+- Goal:
+  - verify whether the newly inserted fallback path in `main.py` is actually usable.
+- Single-case forced fallback test (local sandbox):
+  - command context: `ENABLE_AGGRESSIVE_FALLBACK=1 CLOUD_FALLBACK_TOOL_THRESHOLD=1`
+  - observed output: `fallback_reason="many_tools_low_coverage"` with `cloud_error` DNS resolution failure for `generativelanguage.googleapis.com`
+  - result source stayed `on-device`
+- Single-case forced fallback test (external network):
+  - same code/flags, run with unrestricted network
+  - observed output: `source="cloud (fallback)"`, `cloud_model="gemini-2.5-flash-lite"`
+  - conclusion: fallback logic itself works; local sandbox DNS is the blocker.
+
+## 35) main.py Benchmark (External Network)
+- Run log:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_064040.md`
+- Metrics:
+  - total score: `74.3%`
+  - overall avg F1: `0.86`
+  - on-device: `29/30` (`97%`)
+  - cloud: `1/30` (`3%`)
+- Interpretation:
+  - Current `main.py` fallback gate is too conservative for broad cloud usage.
+  - Fallback is not globally broken; it triggers on a narrow subset in reachable-network environments.
+
+## 36) Logging Note
+- Two benchmark processes were started concurrently once, and both attempted to write the same timestamped filename.
+- Going forward, benchmark runs should be sequential to avoid timestamp collision in `benchmark_runs/`.
