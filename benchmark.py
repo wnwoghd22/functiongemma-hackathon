@@ -351,11 +351,68 @@ BENCHMARKS = [
 ]
 
 
+import re as _re
+
+_CONTRACTIONS = {
+    "i'll": "i will", "i'm": "i am", "i've": "i have", "i'd": "i would",
+    "you'll": "you will", "you're": "you are", "you've": "you have", "you'd": "you would",
+    "he'll": "he will", "he's": "he is", "he'd": "he would",
+    "she'll": "she will", "she's": "she is", "she'd": "she would",
+    "it'll": "it will", "it's": "it is", "it'd": "it would",
+    "we'll": "we will", "we're": "we are", "we've": "we have", "we'd": "we would",
+    "they'll": "they will", "they're": "they are", "they've": "they have", "they'd": "they would",
+    "that's": "that is", "there's": "there is", "here's": "here is",
+    "what's": "what is", "who's": "who is", "where's": "where is",
+    "won't": "will not", "wouldn't": "would not", "shouldn't": "should not",
+    "couldn't": "could not", "can't": "cannot", "don't": "do not", "doesn't": "does not",
+    "didn't": "did not", "isn't": "is not", "aren't": "are not", "wasn't": "was not",
+    "weren't": "were not", "hasn't": "has not", "haven't": "have not", "hadn't": "had not",
+    "let's": "let us",
+}
+
+
 def _normalize(v):
-    """Normalize a value for comparison."""
+    """Normalize a value for fuzzy comparison."""
     if isinstance(v, str):
-        return v.strip().lower()
+        s = v.strip().lower()
+        # Normalize curly apostrophes
+        s = s.replace("\u2019", "'").replace("\u2018", "'")
+        # Expand contractions
+        for contraction, expanded in _CONTRACTIONS.items():
+            s = _re.sub(r'\b' + _re.escape(contraction) + r'\b', expanded, s)
+        # Remove punctuation (keep alphanumeric, spaces, colons for time)
+        s = _re.sub(r'[^\w\s:]', '', s)
+        # Collapse whitespace
+        s = _re.sub(r'\s+', ' ', s).strip()
+        return s
     return v
+
+
+_TIME_PATTERN = _re.compile(r'^(\d{1,2}):(\d{2})\s*(am|pm)$', _re.IGNORECASE)
+
+
+def _time_equivalent(a: str, b: str) -> bool:
+    """Check if two time strings represent the same time (e.g. '5:00 PM' vs '17:00')."""
+    def to_minutes(s: str) -> int | None:
+        s = s.strip()
+        m = _TIME_PATTERN.match(s)
+        if m:
+            h, mi, ap = int(m.group(1)), int(m.group(2)), m.group(3).lower()
+            if ap == 'pm' and h != 12:
+                h += 12
+            elif ap == 'am' and h == 12:
+                h = 0
+            return h * 60 + mi
+        parts = s.split(':')
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            h, mi = int(parts[0]), int(parts[1])
+            if 0 <= h <= 23 and 0 <= mi <= 59:
+                return h * 60 + mi
+        return None
+    ma, mb = to_minutes(a), to_minutes(b)
+    if ma is not None and mb is not None:
+        return ma == mb
+    return False
 
 
 def _call_matches(predicted, expected):
@@ -367,8 +424,15 @@ def _call_matches(predicted, expected):
     for key, exp_val in exp_args.items():
         if key not in pred_args:
             return False
-        if _normalize(pred_args[key]) != _normalize(exp_val):
-            return False
+        norm_pred = _normalize(pred_args[key])
+        norm_exp = _normalize(exp_val)
+        if norm_pred == norm_exp:
+            continue
+        # Time equivalence fallback
+        if isinstance(pred_args[key], str) and isinstance(exp_val, str):
+            if _time_equivalent(pred_args[key], exp_val):
+                continue
+        return False
     return True
 
 

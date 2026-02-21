@@ -210,3 +210,96 @@ These rules are designed around failure types, not benchmark-specific phrases.
   - keep clearly single/simple cases on-device
   - escalate multi-action and communication-heavy tasks to cloud
 - This split is more robust than case-specific hardcoding and aligns with hidden-eval generalization goals.
+
+## 15) Low-Level Scope Clarification (What Is Actually In-Bounds)
+- In-bounds for hackathon scoring:
+  - Internal logic of `generate_hybrid` in `main.py`
+  - Prompting/options passed to `cactus_complete`
+  - Routing policy, validation gates, retry/escalation, output post-processing
+- Out-of-bounds or low-impact for leaderboard scoring:
+  - Changing local benchmark scoring logic (`benchmark.py`) does not transfer to server score.
+  - C++ engine/source tuning is not part of submission payload for leaderboard eval.
+- Why:
+  - README says primary task is internal logic of `generate_hybrid`.
+  - `submit.py` uploads `main.py` file to eval server.
+  - Local `benchmark.py` is for iteration only and can diverge from server-side evaluator.
+- Source refs:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/README.md:34`
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/README.md:35`
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/submit.py:22`
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/submit.py:26`
+
+## 16) Multi-Tool Partial Routing Feasibility
+- Question: for a multi-action task, can some tools be on-device and others via cloud?
+- Short answer: yes, in user-space orchestration inside `generate_hybrid`.
+- Mechanically possible because benchmark only scores returned `function_calls` list, not generation provenance.
+- Practical pattern:
+  1. Run local once.
+  2. Validate local calls (structure/name/args/coverage).
+  3. If multi-action is under-called or low-confidence, run cloud for recovery.
+  4. Merge/dedupe calls and return one final list.
+- Constraints and risks:
+  - Duplicate calls can lower precision.
+  - Conflicting arguments across local/cloud need deterministic tie-break rules.
+  - Latency increases if both paths are always run.
+  - Overfitting risk if merge logic is benchmark-case specific.
+- Related implementation cues:
+  - Current code already has fallback gates and cloud retry points.
+  - Multi-action detection exists and can trigger selective second-pass calls.
+- Source refs:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/main.py:97`
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/main.py:179`
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark.py:471`
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark.py:472`
+
+## 17) Benchmark Update: 20260222_020138 (v2.2 + fuzzy)
+- New run file:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_020138.md`
+- Reported metrics:
+  - total score: `62.5%`
+  - avg F1: `0.97`
+  - avg time: `957.72ms`
+  - on-device ratio: `20%`
+- Relative snapshots:
+  - `v2.1 (013032)`: `60.9%`, F1 `0.96`, on-device `20%`
+  - `v2.2 strict (014541)`: `59.2%`, F1 `0.92`, on-device `20%`
+  - `v21_minplus (015239)`: `60.2%`, F1 `0.96`, on-device `20%`
+
+## 18) Interpreting the 62.5% Rise (Important Caveat)
+- The `020138` note explicitly states this run used fuzzy matching changes in `benchmark.py`
+  (`_normalize()` and `_time_equivalent()` enhancements).
+- This can raise local score without changing routing quality.
+- Since leaderboard submission sends `main.py`, benchmark-side normalization changes are unlikely to affect official hidden-eval results.
+- Therefore:
+  - treat `62.5%` as local-analysis signal, not guaranteed leaderboard gain.
+  - keep routing improvements and optional output normalization in `main.py`, not in benchmark scorer.
+- Source refs:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_020138.md:88`
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_020138.md:84`
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/submit.py:22`
+
+## 19) Fuzzy Matching vs Multi-Action (Relation and Co-Use)
+- They are related but solve different failure classes:
+  - Multi-action routing addresses missing/under-called function sets (coverage problem).
+  - Fuzzy normalization addresses lexical/value drift in arguments (matching problem).
+- Why they often co-occur:
+  - Multi-action cases contain more argument fields across more calls, so one lexical mismatch can sink F1.
+- Can they be used together?
+  - Yes, and this is recommended.
+  - Use routing to get the right set/number of calls.
+  - Use lightweight canonicalization in `main.py` output post-processing for high-variance fields
+    (for example message punctuation/case and time-format normalization).
+- Guardrails:
+  - keep canonicalization conservative and schema-aware.
+  - avoid broad fuzzy rewrites that can hide genuinely wrong semantics.
+  - avoid benchmark-only scorer edits when evaluating leaderboard readiness.
+
+## 20) Practical Next Experiment Direction
+- Base strategy: keep `v2.1` routing backbone (stronger hard-task stability than minplus in recent runs).
+- Add minimal post-processing in `main.py` only:
+  1. canonicalize `send_message.message` punctuation/case normalization
+  2. canonicalize time formats (`5:00 PM` vs `17:00`) for reminder/alarm-like arguments
+  3. no semantic rewriting of content words
+- Then run A/B:
+  - local benchmark with current scorer
+  - submit one hourly leaderboard trial to validate transferability.
