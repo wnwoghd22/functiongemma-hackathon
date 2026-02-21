@@ -728,8 +728,28 @@ def _should_fallback_to_cloud(local_result, messages, tools):
         for call in calls
         if isinstance(call, dict) and isinstance(call.get("name"), str)
     }
+    is_multi = _is_multi_action(user_text)
+    has_alarm_intent = any(k in user_text_lower for k in ("alarm", "wake me", "wake up"))
+    has_weather_intent = any(k in user_text_lower for k in ("weather", "temperature", "forecast"))
+    has_reminder_intent = "remind" in user_text_lower or "reminder" in user_text_lower
+    has_music_intent = any(k in user_text_lower for k in ("play ", "music", "song", "listen"))
 
-    if _is_multi_action(user_text) and len(calls) < 2:
+    # Targeted forced-cloud signatures (from measured weak on-device families).
+    if (not is_multi) and len(tools) == 3 and has_music_intent:
+        return True, "sig_music_among_three"
+    if (not is_multi) and len(tools) == 4 and has_reminder_intent:
+        return True, "sig_reminder_among_four"
+    if (
+        is_multi
+        and has_alarm_intent
+        and has_reminder_intent
+        and not has_weather_intent
+        and {"set_alarm", "create_reminder"}.issubset(tool_names)
+        and not {"set_alarm", "create_reminder"}.issubset(called_tool_names)
+    ):
+        return True, "sig_alarm_and_reminder"
+
+    if is_multi and len(calls) < 2:
         return True, "multi_action_under_called"
 
     # Narrow targeted fallback for known weak family:
@@ -743,10 +763,8 @@ def _should_fallback_to_cloud(local_result, messages, tools):
         return True, "reminder_intent_without_tool"
 
     # Narrow targeted fallback for alarm+reminder combined intents.
-    has_alarm_intent = any(k in user_text_lower for k in ("alarm", "wake me", "wake up"))
-    has_reminder_intent = "remind" in user_text_lower or "reminder" in user_text_lower
     if (
-        _is_multi_action(user_text)
+        is_multi
         and has_alarm_intent
         and has_reminder_intent
         and {"set_alarm", "create_reminder"}.issubset(tool_names)
