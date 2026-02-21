@@ -33,6 +33,7 @@ _FUNCTIONGEMMA_PATH = "cactus/weights/functiongemma-270m-it"
 _CACTUS_GLOBAL_MODEL = None
 _CLOUD_FALLBACK_TOOL_THRESHOLD = int(os.environ.get("CLOUD_FALLBACK_TOOL_THRESHOLD", "5"))
 _ENABLE_AGGRESSIVE_FALLBACK = os.environ.get("ENABLE_AGGRESSIVE_FALLBACK", "0") == "1"
+_ALWAYS_REEXTRACT_TOOLS = {"set_alarm", "set_timer", "get_weather"}
 
 _LOCAL_SYSTEM_PROMPT = (
     "You are a function-calling assistant. You MUST call functions. "
@@ -372,6 +373,36 @@ def _sanitize_function_calls(function_calls):
     return sanitized_calls
 
 
+def _is_value_filled(value):
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value) > 0
+    return True
+
+
+def _all_fields_filled(args):
+    if not isinstance(args, dict) or not args:
+        return False
+    return all(_is_value_filled(v) for v in args.values())
+
+
+def _call_dedup_key(call):
+    if not isinstance(call, dict):
+        return ("", "")
+    name = call.get("name")
+    args = call.get("arguments", {})
+    if not isinstance(args, dict):
+        args = {}
+    try:
+        args_key = json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        args_key = str(args)
+    return name, args_key
+
+
 def _enhance_tools(tools):
     enhanced = []
     for t in tools:
@@ -473,7 +504,7 @@ def _select_tool_by_keywords(user_text, tools):
 def _is_multi_action(user_text, tools=None):
     text_lower = user_text.lower()
     markers = (" and ", " then ", " also ", " plus ", ", and ")
-    return any(m in text_lower for m in markers) or text_lower.count(",") >= 1
+    return any(m in text_lower for m in markers)
 
 
 def _split_multi_action(user_text):
@@ -619,10 +650,26 @@ def _call_cactus_single(user_text, all_tools, confidence_threshold=0.0):
 
     final_calls = []
     for call in calls:
+        if not isinstance(call, dict):
+            continue
+
         name = call.get("name")
         args = call.get("arguments", {})
-        if not args and name:
-            args = _extract_args_for_tool(name, user_text, {})
+        if not isinstance(args, dict):
+            args = {}
+
+        # Defensive override:
+        # - For structurally reliable tools, always prefer regex extraction.
+        # - For others, only override when regex is complete or model args are empty/broken.
+        if name in _ALWAYS_REEXTRACT_TOOLS:
+            args = _extract_args_for_tool(name, user_text, args)
+        else:
+            rule_args = _extract_args_for_tool(name, user_text, {})
+            if _all_fields_filled(rule_args):
+                args = rule_args
+            elif not _all_fields_filled(args):
+                args = _extract_args_for_tool(name, user_text, args)
+
         final_calls.append({"name": name, "arguments": args})
 
     return {
@@ -674,8 +721,37 @@ def _should_fallback_to_cloud(local_result, messages, tools):
                 return True, "empty_required_string"
 
     user_text = _messages_to_user_text(messages)
+    user_text_lower = user_text.lower()
+    called_tool_names = {
+        call.get("name")
+        for call in calls
+        if isinstance(call, dict) and isinstance(call.get("name"), str)
+    }
+
     if _is_multi_action(user_text) and len(calls) < 2:
         return True, "multi_action_under_called"
+
+    # Narrow targeted fallback for known weak family:
+    # reminder intent with many candidate tools but no reminder call selected.
+    if (
+        len(tools) >= 4
+        and ("remind" in user_text_lower or "reminder" in user_text_lower)
+        and "create_reminder" in tool_names
+        and "create_reminder" not in called_tool_names
+    ):
+        return True, "reminder_intent_without_tool"
+
+    # Narrow targeted fallback for alarm+reminder combined intents.
+    has_alarm_intent = any(k in user_text_lower for k in ("alarm", "wake me", "wake up"))
+    has_reminder_intent = "remind" in user_text_lower or "reminder" in user_text_lower
+    if (
+        _is_multi_action(user_text)
+        and has_alarm_intent
+        and has_reminder_intent
+        and {"set_alarm", "create_reminder"}.issubset(tool_names)
+        and not {"set_alarm", "create_reminder"}.issubset(called_tool_names)
+    ):
+        return True, "alarm_reminder_combo_incomplete"
 
     if _ENABLE_AGGRESSIVE_FALLBACK and len(tools) >= _CLOUD_FALLBACK_TOOL_THRESHOLD and len(calls) <= 1:
         return True, "many_tools_low_coverage"
@@ -884,10 +960,11 @@ def generate_hybrid(messages, tools, confidence_threshold=0.0):
         seen = set()
         dedup_calls = []
         for call in all_calls:
-            name = call.get("name")
-            if name and name not in seen:
-                dedup_calls.append(call)
-                seen.add(name)
+            key = _call_dedup_key(call)
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup_calls.append(call)
 
         local = {
             "function_calls": dedup_calls,

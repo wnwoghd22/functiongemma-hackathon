@@ -351,6 +351,36 @@ def _sanitize_function_calls(function_calls):
     return sanitized_calls
 
 
+def _is_value_filled(value):
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value) > 0
+    return True
+
+
+def _all_fields_filled(args):
+    if not isinstance(args, dict) or not args:
+        return False
+    return all(_is_value_filled(v) for v in args.values())
+
+
+def _call_dedup_key(call):
+    if not isinstance(call, dict):
+        return ("", "")
+    name = call.get("name")
+    args = call.get("arguments", {})
+    if not isinstance(args, dict):
+        args = {}
+    try:
+        args_key = json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        args_key = str(args)
+    return name, args_key
+
+
 def _select_tool_by_keywords(user_text, tools):
     """Heuristic fallback tool selection when cactus fails. No priority boosts."""
     text_lower = user_text.lower()
@@ -369,7 +399,7 @@ def _select_tool_by_keywords(user_text, tools):
 def _is_multi_action(user_text):
     text_lower = user_text.lower()
     markers = (" and ", " then ", " also ", " plus ", ", and ")
-    return any(m in text_lower for m in markers) or text_lower.count(",") >= 1
+    return any(m in text_lower for m in markers)
 
 
 def _split_multi_action(user_text):
@@ -471,10 +501,10 @@ def _call_cactus_single(user_text, all_tools):
             args = _extract_args_for_tool(name, user_text, args)
         else:
             rule_args = _extract_args_for_tool(name, user_text, {})
-            if rule_args and all(v for v in rule_args.values()):
+            if _all_fields_filled(rule_args):
                 # Regex produced complete result — use it
                 args = rule_args
-            elif not args or not any(v for v in args.values() if v):
+            elif not _all_fields_filled(args):
                 # Cactus args are empty/broken — use regex with fallback
                 args = _extract_args_for_tool(name, user_text, args)
 
@@ -509,14 +539,15 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
             all_calls.extend(res.get("function_calls", []))
             total_time += res.get("total_time_ms", 0)
 
-        # Dedup by tool name
+        # Dedup by (tool, arguments) to preserve repeated tool calls with different args.
         seen = set()
         dedup_calls = []
         for call in all_calls:
-            name = call.get("name")
-            if name and name not in seen:
-                dedup_calls.append(call)
-                seen.add(name)
+            key = _call_dedup_key(call)
+            if key in seen:
+                continue
+            dedup_calls.append(call)
+            seen.add(key)
 
         return {
             "function_calls": dedup_calls,

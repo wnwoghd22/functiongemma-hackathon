@@ -488,3 +488,79 @@ These rules are designed around failure types, not benchmark-specific phrases.
 ## 36) Logging Note
 - Two benchmark processes were started concurrently once, and both attempted to write the same timestamped filename.
 - Going forward, benchmark runs should be sequential to avoid timestamp collision in `benchmark_runs/`.
+
+## 37) Leaderboard Submission (main.py, current)
+- Submission command:
+  - `python3 submit.py --team "jay" --location "Online"`
+- Submission ID:
+  - `da948b8d073d4adea3da13afbd89c1f1`
+- Initial queue status:
+  - `queued`, queue size observed around `17~21`.
+- Note:
+  - This submission is intended as a direct read on current `main.py` transfer behavior.
+
+### Result update
+- Completed hidden-eval result:
+  - score: `70.7%`
+  - avg F1: `0.7744`
+  - avg time: `3691.39ms`
+  - on-device: `100%`
+  - timestamp: `2026-02-21T22:00:38Z`
+
+## 38) Remaining Improvement Backlog (High-Impact)
+- Based on recent run:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_064040.md`
+  - repeated low-F cases:
+    - `message_among_three`, `alarm_among_three`, `reminder_among_four`
+    - `alarm_and_weather`, `search_and_message`, `timer_music_reminder`
+- Candidate improvements:
+  1. Add targeted cloud fallback signatures only for the low-F set above (keep high-F on-device region untouched).
+  2. Tighten multi-action detection (`_is_multi_action`) to avoid comma-only false positives.
+  3. Remove tool-name-only dedup in multi-action path; preserve distinct calls (or dedup by full `(name, args)` tuple).
+  4. Parse and propagate local `confidence` from Cactus output instead of forcing `confidence=1.0`; use it in fallback gating.
+  5. Add fallback triggers for suspicious local outputs (e.g., placeholder args `""/0`, parse-repair path usage, under-called multi-action).
+
+## 39) Hidden Submission Failure Inference Doc Added
+- New document:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/hidden_submission_failure_inference_20260222.md`
+- Purpose:
+  - summarize repeated hidden-submission failure signals from aggregate-only evidence.
+  - map recurring local low-F families to hidden-risk hypotheses.
+  - define diagnostic rules from aggregate metrics (`F1`, `on_device_pct`, `avg_time_ms`) for next submissions.
+- Key highlighted patterns:
+  - repeated hidden `on_device_pct=100%` despite strategy changes,
+  - repeated multi-intent low-F families (`alarm/reminder/message` mixes),
+  - cloud non-materialization vs over-conservative trigger tradeoff.
+
+## 40) Priority Plan Patch Applied (Phase 1~3 Core)
+- Source plan:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/PRIORITY_PLAN.md`
+- Applied code changes:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/main.py`
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/strategies/strategy_targeted_v2.py`
+- Implemented:
+  1. `_is_multi_action` comma-only trigger removed (conjunction markers only).
+  2. Multi-action dedup changed from `tool-name only` to `(name,args)` signature.
+  3. `main.py` got defensive re-extract parity:
+     - `_ALWAYS_REEXTRACT_TOOLS = {set_alarm, set_timer, get_weather}`
+     - non-core tools only overridden when regex output is fully filled.
+  4. Narrow cloud trigger signals added in `main.py`:
+     - `reminder_intent_without_tool`
+     - `alarm_reminder_combo_incomplete`
+- Sanity:
+  - `python3 -m py_compile main.py strategies/strategy_targeted_v2.py` passed.
+
+## 41) Benchmark Update: 20260222_070748 (patched main.py)
+- Run log:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_070748.md`
+- Metrics:
+  - total score: `81.7%`
+  - overall avg F1: `0.95`
+  - overall avg time: `1356.94ms`
+  - on-device: `30/30` (`100%`)
+- Remaining misses:
+  - `reminder_among_four` (`F1=0.00`)
+  - `alarm_and_reminder` (`F1=0.50`)
+- Interpretation:
+  - Phase 1+2 fixes had large local impact (especially multi-action quality).
+  - Local sandbox still has cloud DNS limits, so cloud ratio remains 0% locally.
