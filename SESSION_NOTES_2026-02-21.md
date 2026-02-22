@@ -784,3 +784,53 @@ These rules are designed around failure types, not benchmark-specific phrases.
   - `fastpath_lowrisk_v3`: fast `2`, fallback `7`
 - Takeaway:
   - v2/v3 reduce overfitting risk by shrinking fast-path coverage on variant phrasings.
+
+## 57) New Strategy Trial: fastpath_downside_guard_v1
+- New file:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/strategies/strategy_fastpath_downside_guard_v1.py`
+- Design:
+  - keep `main.py` frozen.
+  - keep fast-path for very clear single-intent requests only.
+  - add downside guard:
+    - no cloud path in this wrapper (on-device deterministic behavior),
+    - strict required-argument and suspicious-default checks,
+    - quality-gated on-device recovery pass with normalized phrasing.
+- Benchmark command:
+  - `./scripts/run_benchmark_logged.sh python3 ./scripts/benchmark_strategy.py --strategy strategies.strategy_fastpath_downside_guard_v1`
+- Run log:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_095748.md`
+- Metrics:
+  - total score: `86.0%`
+  - overall avg F1: `0.95`
+  - on-device: `30/30` (`100%`)
+  - cloud: `0/30` (`0%`)
+  - overall avg time: `884.19ms`
+- Delta / rationale:
+  - vs `fastpath_robust_v2` (`91.0`), this variant trades some speed/accuracy upside for stricter downside controls.
+  - remaining misses were concentrated in known hard families:
+    - `reminder_among_four` (`F1=0.00`)
+    - `alarm_and_reminder` (`F1=0.50`)
+
+## 58) New Strategy Trial: fastpath_downside_guard_v2
+- New file:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/strategies/strategy_fastpath_downside_guard_v2.py`
+- Change from v1:
+  - keeps v1 fast-path + downside guards.
+  - adds narrow pattern-based repairs:
+    - single-intent reminder repair (`remind ... at ...` when `create_reminder` is available but missing),
+    - alarm+reminder multi-intent completion (fill missing side by split/full-text extraction).
+  - candidate replacement is only accepted when `v1` quality score improves.
+- Benchmark command:
+  - `./scripts/run_benchmark_logged.sh python3 ./scripts/benchmark_strategy.py --strategy strategies.strategy_fastpath_downside_guard_v2`
+- Run log:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_100138.md`
+- Metrics:
+  - total score: `88.5%`
+  - overall avg F1: `0.99`
+  - on-device: `30/30` (`100%`)
+  - cloud: `0/30` (`0%`)
+  - overall avg time: `880.03ms`
+- Delta vs v1 (`86.0`):
+  - +2.5 points.
+  - `reminder_among_four`: `0.00 -> 1.00` recovered.
+  - `alarm_and_reminder`: `0.50 -> 0.80` partial recovery.
