@@ -834,3 +834,10 @@ These rules are designed around failure types, not benchmark-specific phrases.
   - +2.5 points.
   - `reminder_among_four`: `0.00 -> 1.00` recovered.
   - `alarm_and_reminder`: `0.50 -> 0.80` partial recovery.
+
+## 59) Final Submission Document Added
+- New file:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/HACKATHON_FINAL_SUBMISSION.md`
+- Purpose:
+  - one-page English submission summary for hackathon close-out.
+  - includes demo steps, architecture/routing rationale, FunctionGemma/Gemini usage justification, and best verified hidden result (`81.3`).
