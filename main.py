@@ -957,7 +957,156 @@ def _generate_cloud(messages, tools):
     raise RuntimeError(last_error or "cloud_generation_failed")
 
 
-def generate_hybrid(messages, tools, confidence_threshold=0.0):
+def _fastpath_has_any(text, keywords):
+    return any(k in text for k in keywords)
+
+
+def _fastpath_intent_hits(user_text, tools):
+    text = user_text.lower()
+    names = {t.get("name") for t in tools if t.get("name")}
+    hits = {}
+
+    if "get_weather" in names:
+        hits["get_weather"] = _fastpath_has_any(
+            text,
+            ("weather", "temperature", "forecast", "outside", "rain", "snow", "sunny"),
+        )
+    if "set_alarm" in names:
+        hits["set_alarm"] = _fastpath_has_any(
+            text,
+            ("alarm", "wake me", "wake up", "wake-up"),
+        )
+    if "set_timer" in names:
+        hits["set_timer"] = _fastpath_has_any(
+            text,
+            ("timer", "countdown", "minute", "minutes", "second", "seconds"),
+        )
+    if "play_music" in names:
+        hits["play_music"] = _fastpath_has_any(
+            text,
+            ("play ", "music", "song", "listen", "track", "tune", "tunes"),
+        )
+    if "search_contacts" in names:
+        hits["search_contacts"] = _fastpath_has_any(
+            text,
+            ("find ", "look up", "lookup", "search", "contact", "contacts", "phonebook"),
+        )
+    if "send_message" in names:
+        hits["send_message"] = _fastpath_has_any(
+            text,
+            ("text ", "message", "send ", "tell ", "sms", "msg"),
+        )
+    if "create_reminder" in names:
+        hits["create_reminder"] = _fastpath_has_any(
+            text,
+            ("remind", "reminder"),
+        )
+
+    return {k: v for k, v in hits.items() if v}
+
+
+def _fastpath_unambiguous_single_intent(user_text, tools):
+    text = user_text.strip()
+
+    # Keep fast-path narrow to reduce hidden overfit risk.
+    if len(text) > 120:
+        return False, None
+    if _is_multi_action(text):
+        return False, None
+    if text.count(",") >= 1:
+        return False, None
+
+    hits = _fastpath_intent_hits(text, tools)
+    if len(hits) != 1:
+        return False, None
+
+    return True, next(iter(hits.keys()))
+
+
+def _fastpath_required_valid(tool_name, args, tools, user_text):
+    tool_map = {t.get("name"): t for t in tools if t.get("name")}
+    if tool_name not in tool_map or not isinstance(args, dict):
+        return False
+
+    required = tool_map[tool_name].get("parameters", {}).get("required", [])
+    for req in required:
+        if req not in args or not _is_value_filled(args.get(req)):
+            return False
+
+    text = user_text.lower()
+    if tool_name == "set_alarm":
+        h = args.get("hour")
+        m = args.get("minute")
+        if not isinstance(h, int) or not isinstance(m, int):
+            return False
+        if h == 0 and m == 0 and not _fastpath_has_any(text, ("12 am", "midnight", "00:00")):
+            return False
+    elif tool_name == "set_timer":
+        minutes = args.get("minutes")
+        if not isinstance(minutes, int) or minutes <= 0:
+            return False
+    elif tool_name == "get_weather":
+        loc = str(args.get("location", "")).strip().lower()
+        if loc in {"", "here", "there", "outside"}:
+            return False
+    elif tool_name == "search_contacts":
+        q = str(args.get("query", "")).strip().lower()
+        if q in {"", "contact", "contacts"}:
+            return False
+    elif tool_name == "play_music":
+        song = str(args.get("song", "")).strip()
+        if len(song) < 2:
+            return False
+    elif tool_name == "send_message":
+        recipient = str(args.get("recipient", "")).strip()
+        message = str(args.get("message", "")).strip()
+        if not recipient or not message:
+            return False
+        if len(message) < 2:
+            return False
+    elif tool_name == "create_reminder":
+        title = str(args.get("title", "")).strip()
+        time_str = str(args.get("time", "")).strip()
+        if not title or not time_str:
+            return False
+
+    return True
+
+
+def _try_fastpath_robust(user_text, tools):
+    is_single, tool_name = _fastpath_unambiguous_single_intent(user_text, tools)
+    if not is_single:
+        return None
+
+    # Extra template gates for higher-risk tools.
+    text_l = user_text.lower()
+    if tool_name == "send_message":
+        if not (
+            re.search(r'\bto\s+\w+\s+(?:saying|that)\s+', text_l)
+            or re.search(r'\b(?:text|message)\s+\w+\s+', text_l)
+        ):
+            return None
+    if tool_name == "create_reminder":
+        if not re.search(r'\bremind(?:\s+me)?\b.+\bat\b', text_l):
+            return None
+
+    args = _extract_args_for_tool(tool_name, user_text, {})
+    sanitized = _sanitize_function_calls([{"name": tool_name, "arguments": args}])
+    if not sanitized:
+        return None
+    call = sanitized[0]
+    if not isinstance(call, dict):
+        return None
+    out_args = call.get("arguments")
+    if not isinstance(out_args, dict):
+        return None
+    if not _fastpath_required_valid(tool_name, out_args, tools, user_text):
+        return None
+
+    return {"name": tool_name, "arguments": out_args}
+
+
+def _generate_hybrid_core(messages, tools, confidence_threshold=0.0, allow_cloud=True):
     user_text = _messages_to_user_text(messages)
 
     if _is_multi_action(user_text):
@@ -997,6 +1146,10 @@ def generate_hybrid(messages, tools, confidence_threshold=0.0):
         local["confidence"] = 1.0
         local["success"] = True
 
+    if not allow_cloud:
+        local["fallback_reason"] = "on_device_safe_mode"
+        return local
+
     needs_cloud, reason = _should_fallback_to_cloud(local, messages, tools)
     if not needs_cloud:
         local["fallback_reason"] = reason
@@ -1013,3 +1166,28 @@ def generate_hybrid(messages, tools, confidence_threshold=0.0):
         local["fallback_reason"] = reason
         local["cloud_error"] = str(e)
         return local
+
+
+def generate_hybrid(messages, tools, confidence_threshold=0.0):
+    start = time.time()
+    user_text = _messages_to_user_text(messages)
+
+    fast = _try_fastpath_robust(user_text, tools)
+    if fast is not None:
+        return {
+            "function_calls": [fast],
+            "total_time_ms": (time.time() - start) * 1000,
+            "source": "on-device",
+            "confidence": 1.0,
+            "success": True,
+            "policy_tag": f"fastpath_robust_v2::{fast.get('name')}",
+        }
+
+    out = _generate_hybrid_core(
+        messages,
+        tools,
+        confidence_threshold=confidence_threshold,
+        allow_cloud=False,
+    )
+    out.setdefault("policy_tag", "fastpath_robust_v2::fallback_main_safe")
+    return out

@@ -700,3 +700,87 @@ These rules are designed around failure types, not benchmark-specific phrases.
   - current best metrics (`81.3`, `F1 0.9389`, `on-device 100%`)
   - final one-shot guidance (safe/moderate/risky options)
   - explicit go/no-go and pre-submit checklist.
+
+## 52) New Strategy Trial: final_ensemble_v1 (separate file)
+- New file:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/strategies/strategy_final_ensemble_v1.py`
+- Rationale:
+  - keep `main.py` frozen while testing an additive strategy wrapper.
+  - improve hidden robustness via:
+    - paraphrase normalization (`quarter past`, `half hour`, alias words),
+    - quality scoring (required-arg completeness + intent coverage + multi-action completeness),
+    - on-device recovery pass when primary output quality is weak.
+- Benchmark command:
+  - `./scripts/run_benchmark_logged.sh python3 ./scripts/benchmark_strategy.py --strategy strategies.strategy_final_ensemble_v1`
+- Run log:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_084154.md`
+- Metrics:
+  - total score: `83.5%`
+  - overall avg F1: `0.98`
+  - on-device: `30/30` (`100%`)
+  - cloud: `0/30` (`0%`)
+- Notable:
+  - single miss: `alarm_and_reminder` (`F1=0.50`)
+  - score delta vs prior `83.0` class local runs: `+0.5p`.
+
+## 53) New Strategy Trial: fastpath_v1 (separate file)
+- New file:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/strategies/strategy_fastpath_v1.py`
+- Design:
+  - for clear single-intent requests, skip model inference and return deterministic call immediately.
+  - for all other requests, fallback to `strategy_final_ensemble_v1`.
+  - strict guard: required args must be fully filled; otherwise no fast-path.
+- Benchmark command:
+  - `./scripts/run_benchmark_logged.sh python3 ./scripts/benchmark_strategy.py --strategy strategies.strategy_fastpath_v1`
+- Run log:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_084801.md`
+- Metrics:
+  - total score: `91.0%`
+  - overall avg F1: `0.98`
+  - on-device: `30/30` (`100%`)
+  - cloud: `0/30` (`0%`)
+  - overall avg time: `742.47ms`
+- Notable:
+  - easy/medium avg time became near-zero due fast-path (`easy 0.11ms`, `medium 0.03ms`).
+  - hard retains one miss (`alarm_and_reminder`, `F1=0.50`).
+  - this is high upside locally but may carry hidden-eval generalization risk.
+
+## 54) Anti-overfit Variant: fastpath_robust_v2
+- New file:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/strategies/strategy_fastpath_robust_v2.py`
+- Changes vs fastpath_v1:
+  - stricter ambiguity guard (length, multi-action, comma),
+  - stronger required-arg validation by tool,
+  - uncertain cases immediately fallback to `main.generate_hybrid`.
+- Benchmark:
+  - log: `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_085852.md`
+  - score: `91.0%`
+  - avg F1: `0.98`
+  - on-device: `100%`
+  - avg time: `743.44ms`
+- Interpretation:
+  - public benchmark score is unchanged from v1, but fast-path trigger is more conservative on paraphrases.
+
+## 55) Low-risk Conservative Variant: fastpath_lowrisk_v3
+- New file:
+  - `/Users/jaehong/Desktop/functiongemma-hackathon/strategies/strategy_fastpath_lowrisk_v3.py`
+- Policy:
+  - fast-path limited to 4 robust tools only:
+    - `get_weather`, `set_alarm`, `set_timer`, `search_contacts`
+  - `send_message`, `create_reminder`, `play_music` always fallback to `main`.
+- Benchmark:
+  - log: `/Users/jaehong/Desktop/functiongemma-hackathon/benchmark_runs/benchmark_20260222_085948.md`
+  - score: `86.8%`
+  - avg F1: `0.98`
+  - on-device: `100%`
+  - avg time: `878.03ms`
+- Interpretation:
+  - lower local score but meaningfully reduced fast-path exposure surface.
+
+## 56) Paraphrase Trigger-Surface Check (non-benchmark)
+- Compared fast-path trigger behavior on paraphrase prompts:
+  - `fastpath_v1`: fast `9`, fallback `0`
+  - `fastpath_robust_v2`: fast `5`, fallback `4`
+  - `fastpath_lowrisk_v3`: fast `2`, fallback `7`
+- Takeaway:
+  - v2/v3 reduce overfitting risk by shrinking fast-path coverage on variant phrasings.
